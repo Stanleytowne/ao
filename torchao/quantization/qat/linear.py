@@ -864,15 +864,39 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
         This is needed for strict state_dict loading in torchtune recipes.
         """
         cfg = self.weight_qat_config
+        # Activation checkpointing can wrap modules and introduce an intermediate
+        # `_checkpoint_wrapped_module` segment in `named_modules()` paths. The
+        # checkpoint state dict (and sometimes even `state_dict()` keys) may not
+        # include that segment. We therefore resolve keys robustly.
+        checkpoint_wrapper_seg = "._checkpoint_wrapped_module"
         for module_name, mod in model.named_modules():
             if not isinstance(mod, PissaQuantQATLinear):
                 continue
 
-            # Weight key is unchanged by our module swap.
-            weight_key = f"{module_name}.weight" if module_name else "weight"
-            if weight_key not in full_sd:
+            # Weight key is unchanged by our module swap, but module_name may include
+            # wrapper segments.
+            candidate_module_names = []
+            if module_name:
+                candidate_module_names.append(module_name)
+                if checkpoint_wrapper_seg in module_name:
+                    candidate_module_names.append(
+                        module_name.replace(checkpoint_wrapper_seg, "")
+                    )
+            else:
+                candidate_module_names.append("")
+
+            weight_key = None
+            for mn in candidate_module_names:
+                wk = f"{mn}.weight" if mn else "weight"
+                if wk in full_sd:
+                    weight_key = wk
+                    break
+            if weight_key is None:
+                # Provide a more actionable error with candidates.
+                candidates = [f"{mn}.weight" if mn else "weight" for mn in candidate_module_names]
                 raise KeyError(
-                    f"Missing {weight_key} in checkpoint state_dict; cannot initialize pissaquant A/B."
+                    "Missing weight key in checkpoint state_dict; cannot initialize pissaquant A/B. "
+                    f"Tried: {candidates}. One example module path was '{module_name}'."
                 )
             w = full_sd[weight_key]
             if w.dim() != 2:
@@ -893,16 +917,11 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
                 s_full, rank=cfg.rank, niter=cfg.svd_niter
             )
 
-            A_key = (
-                f"{module_name}.weight_fake_quantizer.A"
-                if module_name
-                else "weight_fake_quantizer.A"
-            )
-            B_key = (
-                f"{module_name}.weight_fake_quantizer.B"
-                if module_name
-                else "weight_fake_quantizer.B"
-            )
+            # Use the resolved prefix from the weight key to ensure consistent naming
+            # with the checkpoint/model state_dict keyspace.
+            prefix = weight_key[: -len(".weight")] if weight_key != "weight" else ""
+            A_key = f"{prefix}.weight_fake_quantizer.A" if prefix else "weight_fake_quantizer.A"
+            B_key = f"{prefix}.weight_fake_quantizer.B" if prefix else "weight_fake_quantizer.B"
             full_sd[A_key] = A.to(torch.float32)
             full_sd[B_key] = B.to(torch.float32)
 
