@@ -376,7 +376,10 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
         out_features: int,
         in_features: int,
         config: PissaQuantWeightFakeQuantizeConfig,
-        dtype: torch.dtype = torch.float32,
+        # IMPORTANT: keep A/B param dtype consistent with the owning model's
+        # parameter dtype. FSDP expects uniform original parameter dtype within
+        # a param group (e.g. all bf16). We do fp32 math in forward via casts.
+        dtype: torch.dtype,
         device: Optional[torch.device] = None,
     ) -> None:
         super().__init__()
@@ -417,10 +420,11 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
         self.enable_fake_quant(False)
 
     def _compute_scale(self) -> torch.Tensor:
-        # Compute scale in fp32 for stability.
-        s = self.B @ self.A
+        # Compute scale in fp32 for stability, but keep parameters in their
+        # original dtype for FSDP compatibility.
+        s = self.B.to(torch.float32) @ self.A.to(torch.float32)
         s = torch.abs(s) + float(self.config.eps)
-        return s
+        return s  # fp32
 
     def forward(self, w: torch.Tensor) -> torch.Tensor:
         if not self.enabled:

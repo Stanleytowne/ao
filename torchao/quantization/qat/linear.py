@@ -764,7 +764,9 @@ class PissaQuantQATLinear(torch.nn.Linear):
             out_features=out_features,
             in_features=in_features,
             config=weight_qat_config,
-            dtype=torch.float32,
+            # Keep A/B parameter dtype consistent with this Linear's dtype to
+            # satisfy FSDP's uniform original dtype requirement.
+            dtype=self.weight.dtype,
             device=device,
         )
 
@@ -922,7 +924,9 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             prefix = weight_key[: -len(".weight")] if weight_key != "weight" else ""
             A_key = f"{prefix}.weight_fake_quantizer.A" if prefix else "weight_fake_quantizer.A"
             B_key = f"{prefix}.weight_fake_quantizer.B" if prefix else "weight_fake_quantizer.B"
-            full_sd[A_key] = A.to(torch.float32)
-            full_sd[B_key] = B.to(torch.float32)
+            # Store in the same dtype as checkpoint weight; loader will cast to
+            # the destination param dtype (which matches model dtype).
+            full_sd[A_key] = A.to(dtype=w.dtype)
+            full_sd[B_key] = B.to(dtype=w.dtype)
 
         return full_sd
