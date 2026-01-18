@@ -572,7 +572,7 @@ def _get_4w_weight_config(
     return IntxFakeQuantizeConfig(
         dtype=torch.uint4,
         group_size=group_size,
-        is_symmetric=False,
+        is_symmetric=True,
         is_dynamic=True,
         scale_precision=qparams_precision,
         zero_point_precision=qparams_precision,
