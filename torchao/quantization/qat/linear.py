@@ -686,7 +686,8 @@ def _pissaquant_blockwise_symmetric_scales(
         )
 
     # symmetric int4 qmax
-    qmax = 7.0
+    n_bit = 4
+    (qmin, qmax) = _get_qmin_qmax(n_bit)
     w = w.to(torch.float32)
     w_blocks = w.view(m, -1, b)
     max_abs = torch.amax(torch.abs(w_blocks), dim=-1)  # [m, n_blocks]
@@ -811,11 +812,13 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
         self,
         block_size: int = 256,
         use_checkpoint: bool = False,
+        svd_niter: int = 64,
     ) -> None:
         super().__init__()
         self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
             block_size=block_size,
             use_checkpoint=use_checkpoint,
+            svd_niter=svd_niter,
         )
 
     def prepare(
