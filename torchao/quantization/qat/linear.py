@@ -669,10 +669,9 @@ def _pissaquant_blockwise_symmetric_scales(
     Compute per-block symmetric int4 scales along the in_features dimension.
 
     Given W with shape [m, n], we compute block scales with shape [m, n_blocks],
-    where n_blocks = n // block_size (in_features must be divisible by block_size).
+    where n_blocks = n // block_size.
 
     Returns:
-        (scales_block, n_padded)
         scales_block: [m, n_blocks]
     """
     assert w.dim() == 2, "Expected 2D weight matrix"
@@ -689,7 +688,7 @@ def _pissaquant_blockwise_symmetric_scales(
     # symmetric int4 qmax
     qmax = 7.0
     w = w.to(torch.float32)
-    w_blocks = w.view(m, n_padded // b, b)
+    w_blocks = w.view(m, -1, b)
     max_abs = torch.amax(torch.abs(w_blocks), dim=-1)  # [m, n_blocks]
     scales = torch.clamp(max_abs / qmax, min=float(eps))
     return scales
@@ -894,6 +893,9 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
 
             rank = cfg.compute_rank(in_features=w.shape[1], out_features=w.shape[0])
             init_block_size = w.shape[1] // rank
+            while w.shape[1] % init_block_size != 0:
+                init_block_size -= 1
+            assert init_block_size > 0, f"init_block_size ({init_block_size}) must be > 0, got out_features ({w.shape[0]}), in_features ({w.shape[1]}) and rank ({rank})"
 
             scales_block = _pissaquant_blockwise_symmetric_scales(
                 w,

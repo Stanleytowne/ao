@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import abc
+import math
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple, Union
 
@@ -92,7 +93,7 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
         """
         Compute the low-rank factorization rank so that:
 
-            rank * (out_features + in_features) ~= out_features * (in_features / block_size)
+            rank * (out_features + in_features) ~= out_features * ceil(in_features / block_size)
 
         i.e., the number of parameters in A and B approximately matches the number
         of per-group scales in int4 weight-only QAT with the same block size.
@@ -109,8 +110,6 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
         # Nearest integer rank; clamp to valid range.
         rank = max(1, int(round(target_params / denom)))
         rank = min(rank, out_features, in_features)
-
-        assert rank > 0 and in_features % rank == 0, f"rank ({rank}) must be > 0 and in_features ({in_features}) must be divisible by rank ({rank}), got out_features ({out_features}), in_features ({in_features}) and block_size ({self.block_size})"
         return rank
 
 
