@@ -539,7 +539,7 @@ class Int4WeightOnlyQATLinear(FakeQuantizedLinear):
         )
 
     def enable_fake_quant(self, enabled: bool = True):
-        self.activation_fake_quantizer.enabled = enabled
+        # self.activation_fake_quantizer.enabled = enabled
         self.weight_fake_quantizer.enabled = enabled
 
     def disable_fake_quant(self):
