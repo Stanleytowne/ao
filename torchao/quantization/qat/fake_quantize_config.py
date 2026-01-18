@@ -63,30 +63,20 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
     int4 scale estimate derived from the full-precision weights.
     """
 
-    # Low-rank factorization rank (r)
-    rank: int = 16
-
     # Block size (b) used to compute initial block-wise scales along in_features.
-    # This is only used for initialization.
+    # This also controls the *equivalent* scale parameter count to match
+    # int4 weight-only QAT (per-group scales of size `block_size`).
     block_size: int = 256
-
-    # Numerical stability for scale.
-    eps: float = 1e-8
-
-    # If True, allow padding in_features to a multiple of block_size during initialization.
-    # (Forward pass still uses exact shapes; padding is only for init.)
-    padding_allowed: bool = False
-
-    # Low-rank SVD init iterations for svd_lowrank (if available).
-    svd_niter: int = 2
 
     # If True, wrap the pissaquant fake-quant computation in gradient checkpointing
     # to reduce activation memory (at the cost of recomputation in backward).
     use_checkpoint: bool = False
 
+    # Fixed numerical stability and init settings.
+    eps: float = 1e-8
+    svd_niter: int = 64
+
     def __post_init__(self):
-        if self.rank <= 0:
-            raise ValueError(f"rank must be > 0, got {self.rank}")
         if self.block_size <= 0:
             raise ValueError(f"block_size must be > 0, got {self.block_size}")
         if self.eps <= 0:
@@ -97,6 +87,31 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
             raise ValueError(
                 f"use_checkpoint must be a bool, got {type(self.use_checkpoint)}"
             )
+
+    def compute_rank(self, in_features: int, out_features: int) -> int:
+        """
+        Compute the low-rank factorization rank so that:
+
+            rank * (out_features + in_features) ~= out_features * (in_features / block_size)
+
+        i.e., the number of parameters in A and B approximately matches the number
+        of per-group scales in int4 weight-only QAT with the same block size.
+        """
+        if in_features <= 0 or out_features <= 0:
+            raise ValueError("in_features/out_features must be > 0")
+        if in_features % self.block_size != 0:
+            raise ValueError(
+                f"in_features ({in_features}) must be divisible by block_size ({self.block_size}) "
+                "to match int4 weight-only QAT scale parameterization."
+            )
+        target_params = out_features * (in_features // self.block_size)
+        denom = out_features + in_features
+        # Nearest integer rank; clamp to valid range.
+        rank = max(1, int(round(target_params / denom)))
+        rank = min(rank, out_features, in_features)
+
+        assert rank > 0 and in_features % rank == 0, f"rank ({rank}) must be > 0 and in_features ({in_features}) must be divisible by rank ({rank}), got out_features ({out_features}), in_features ({in_features}) and block_size ({self.block_size})"
+        return rank
 
 
 @dataclass

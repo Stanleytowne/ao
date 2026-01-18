@@ -387,7 +387,7 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
         self.config = config
         self.enabled = True
 
-        r = int(config.rank)
+        r = int(config.compute_rank(in_features=in_features, out_features=out_features))
         # We create parameters eagerly so they are part of state_dict. They may
         # initially live on meta during meta initialization; they will be assigned
         # real tensors during state_dict load.

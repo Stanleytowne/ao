@@ -663,18 +663,17 @@ class Float8ActInt4WeightQATQuantizer(_LegacyQATQuantizer):
 
 
 def _pissaquant_blockwise_symmetric_scales(
-    w: torch.Tensor, *, block_size: int, eps: float, padding_allowed: bool
-) -> Tuple[torch.Tensor, int]:
+    w: torch.Tensor, *, block_size: int, eps: float
+) -> torch.Tensor:
     """
     Compute per-block symmetric int4 scales along the in_features dimension.
 
     Given W with shape [m, n], we compute block scales with shape [m, n_blocks],
-    where n_blocks = ceil(n / block_size) if padding_allowed else n // block_size.
+    where n_blocks = n // block_size (in_features must be divisible by block_size).
 
     Returns:
         (scales_block, n_padded)
         scales_block: [m, n_blocks]
-        n_padded: in_features after optional padding (== n if no padding)
     """
     assert w.dim() == 2, "Expected 2D weight matrix"
     m, n = w.shape
@@ -682,15 +681,10 @@ def _pissaquant_blockwise_symmetric_scales(
     if b <= 0:
         raise ValueError(f"block_size must be > 0, got {block_size}")
     if (n % b) != 0:
-        if not padding_allowed:
-            raise ValueError(
-                f"in_features ({n}) must be divisible by block_size ({b}) unless padding_allowed=True"
-            )
-        n_padded = ((n + b - 1) // b) * b
-        pad = n_padded - n
-        w = torch.nn.functional.pad(w, (0, pad), mode="constant", value=0.0)
-    else:
-        n_padded = n
+        raise ValueError(
+            f"in_features ({n}) must be divisible by block_size ({b}) to match int4 "
+            "weight-only QAT scale parameterization."
+        )
 
     # symmetric int4 qmax
     qmax = 7.0
@@ -698,7 +692,7 @@ def _pissaquant_blockwise_symmetric_scales(
     w_blocks = w.view(m, n_padded // b, b)
     max_abs = torch.amax(torch.abs(w_blocks), dim=-1)  # [m, n_blocks]
     scales = torch.clamp(max_abs / qmax, min=float(eps))
-    return scales, n_padded
+    return scales
 
 
 def _pissaquant_lowrank_factorize(
@@ -816,20 +810,12 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
 
     def __init__(
         self,
-        rank: int = 16,
         block_size: int = 256,
-        eps: float = 1e-8,
-        padding_allowed: bool = False,
-        svd_niter: int = 2,
         use_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
-            rank=rank,
             block_size=block_size,
-            eps=eps,
-            padding_allowed=padding_allowed,
-            svd_niter=svd_niter,
             use_checkpoint=use_checkpoint,
         )
 
@@ -906,19 +892,18 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             if w.dim() != 2:
                 continue
 
-            scales_block, n_padded = _pissaquant_blockwise_symmetric_scales(
+            rank = cfg.compute_rank(in_features=w.shape[1], out_features=w.shape[0])
+            init_block_size = w.shape[1] // rank
+
+            scales_block = _pissaquant_blockwise_symmetric_scales(
                 w,
-                block_size=cfg.block_size,
+                block_size=init_block_size,
                 eps=cfg.eps,
-                padding_allowed=cfg.padding_allowed,
             )
             # Expand to per-element initial scale matrix (m x n_padded)
-            s_full = scales_block.repeat_interleave(cfg.block_size, dim=1)
-            # Trim to exact in_features
-            s_full = s_full[:, : w.shape[1]]
-
+            s_full = scales_block.repeat_interleave(init_block_size, dim=1)
             B, A = _pissaquant_lowrank_factorize(
-                s_full, rank=cfg.rank, niter=cfg.svd_niter
+                s_full, rank=rank, niter=cfg.svd_niter
             )
 
             # Use the resolved prefix from the weight key to ensure consistent naming
