@@ -37,6 +37,7 @@ from .fake_quantize_config import (
     Float8FakeQuantizeConfig,
     Int4WeightFakeQuantizeConfig,
     IntxFakeQuantizeConfig,
+    PissaQuantWeightFakeQuantizeConfig,
 )
 from .utils import (
     _fake_quantize_per_channel_group,
@@ -66,6 +67,9 @@ class FakeQuantizerBase(torch.nn.Module):
             return Int4WeightFakeQuantizer(config)
         elif isinstance(config, Float8FakeQuantizeConfig):
             return Float8FakeQuantizer(config)
+        # NOTE: PissaQuant requires module shapes (in_features/out_features) to
+        # initialize its learnable parameters, so it is not constructible from
+        # config alone. It is created by the corresponding QAT linear module.
         else:
             raise ValueError(f"Unknown config type: {config}")
 
@@ -341,3 +345,95 @@ class FakeQuantizer(IntxFakeQuantizer):
     def __init__(self, config: FakeQuantizeConfigBase):
         super().__init__(config)
         _log_deprecation_warning(self)
+
+
+class PissaQuantWeightFakeQuantizer(torch.nn.Module):
+    """
+    Weight fake quantizer for pissaquant.
+
+    This module maintains learnable low-rank factors (B, A) such that:
+
+        S = B @ A   (shape: [out_features, in_features])
+
+    and uses elementwise scale:
+
+        scale = abs(S) + eps
+
+    to perform symmetric int4 fake quantization:
+
+        q = round(w / scale) clipped to [-8, 7]
+        w_hat = q * scale
+
+    Notes:
+    - `A` and `B` are trainable and must be initialized externally (typically by
+      factorizing a block-wise scale estimate from full-precision weights).
+    - We rely on `_Round` for straight-through gradients through rounding.
+    """
+
+    def __init__(
+        self,
+        *,
+        out_features: int,
+        in_features: int,
+        config: PissaQuantWeightFakeQuantizeConfig,
+        dtype: torch.dtype = torch.float32,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.enabled = True
+
+        r = int(config.rank)
+        # We create parameters eagerly so they are part of state_dict. They may
+        # initially live on meta during meta initialization; they will be assigned
+        # real tensors during state_dict load.
+        self.A = torch.nn.Parameter(
+            torch.empty((r, in_features), device=device, dtype=dtype),
+            requires_grad=True,
+        )
+        self.B = torch.nn.Parameter(
+            torch.empty((out_features, r), device=device, dtype=dtype),
+            requires_grad=True,
+        )
+
+        # Track whether an initialization pass populated A/B.
+        self._initialized = False
+
+        torch._C._log_api_usage_once(
+            "torchao.quantization.qat.PissaQuantWeightFakeQuantizer"
+        )
+
+    def mark_initialized(self) -> None:
+        self._initialized = True
+
+    @property
+    def initialized(self) -> bool:
+        return bool(self._initialized)
+
+    def enable_fake_quant(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+
+    def disable_fake_quant(self) -> None:
+        self.enable_fake_quant(False)
+
+    def _compute_scale(self) -> torch.Tensor:
+        # Compute scale in fp32 for stability.
+        s = self.B @ self.A
+        s = torch.abs(s) + float(self.config.eps)
+        return s
+
+    def forward(self, w: torch.Tensor) -> torch.Tensor:
+        if not self.enabled:
+            return w
+
+        # Symmetric int4.
+        qmin, qmax = -8, 7
+
+        scale = self._compute_scale()
+        # Cast scale to fp32 for quant math; keep output dtype matching w.
+        w_fp32 = w.to(torch.float32)
+        scale_fp32 = scale.to(torch.float32)
+
+        q = _Round.apply(w_fp32 / scale_fp32).clamp(qmin, qmax)
+        w_hat = q * scale_fp32
+        return w_hat.to(w.dtype)

@@ -4,7 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -30,9 +30,11 @@ from .fake_quantize_config import (
     FakeQuantizeConfigBase,
     Float8FakeQuantizeConfig,
     IntxFakeQuantizeConfig,
+    PissaQuantWeightFakeQuantizeConfig,
 )
 from .fake_quantizer import (
     FakeQuantizerBase,
+    PissaQuantWeightFakeQuantizer,
 )
 from .utils import (
     _get_qmin_qmax,
@@ -653,3 +655,255 @@ class Float8ActInt4WeightQATQuantizer(_LegacyQATQuantizer):
 
     def get_weight_fake_quantize_config(self) -> Optional[FakeQuantizeConfigBase]:
         return self.weight_config
+
+
+# =====================================================
+# | pissaquant: learnable low-rank per-element scales |
+# =====================================================
+
+
+def _pissaquant_blockwise_symmetric_scales(
+    w: torch.Tensor, *, block_size: int, eps: float, padding_allowed: bool
+) -> Tuple[torch.Tensor, int]:
+    """
+    Compute per-block symmetric int4 scales along the in_features dimension.
+
+    Given W with shape [m, n], we compute block scales with shape [m, n_blocks],
+    where n_blocks = ceil(n / block_size) if padding_allowed else n // block_size.
+
+    Returns:
+        (scales_block, n_padded)
+        scales_block: [m, n_blocks]
+        n_padded: in_features after optional padding (== n if no padding)
+    """
+    assert w.dim() == 2, "Expected 2D weight matrix"
+    m, n = w.shape
+    b = int(block_size)
+    if b <= 0:
+        raise ValueError(f"block_size must be > 0, got {block_size}")
+    if (n % b) != 0:
+        if not padding_allowed:
+            raise ValueError(
+                f"in_features ({n}) must be divisible by block_size ({b}) unless padding_allowed=True"
+            )
+        n_padded = ((n + b - 1) // b) * b
+        pad = n_padded - n
+        w = torch.nn.functional.pad(w, (0, pad), mode="constant", value=0.0)
+    else:
+        n_padded = n
+
+    # symmetric int4 qmax
+    qmax = 7.0
+    w = w.to(torch.float32)
+    w_blocks = w.view(m, n_padded // b, b)
+    max_abs = torch.amax(torch.abs(w_blocks), dim=-1)  # [m, n_blocks]
+    scales = torch.clamp(max_abs / qmax, min=float(eps))
+    return scales, n_padded
+
+
+def _pissaquant_lowrank_factorize(
+    s_full: torch.Tensor, *, rank: int, niter: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Low-rank factorize S (m x n) into (B, A) with shapes (m x r), (r x n).
+
+    Uses torch.linalg.svd_lowrank / torch.svd_lowrank when available, otherwise
+    falls back to full SVD for smaller matrices.
+    """
+    if s_full.dim() != 2:
+        raise ValueError("Expected 2D scale matrix")
+    m, n = s_full.shape
+    r = int(rank)
+    if r <= 0:
+        raise ValueError(f"rank must be > 0, got {rank}")
+    r = min(r, m, n)
+
+    s_full = s_full.to(torch.float32)
+
+    # Prefer low-rank SVD APIs.
+    if hasattr(torch.linalg, "svd_lowrank"):
+        U, S, V = torch.linalg.svd_lowrank(s_full, q=r, niter=int(niter))
+        # U: (m, r), S: (r,), V: (n, r)
+    elif hasattr(torch, "svd_lowrank"):
+        U, S, V = torch.svd_lowrank(s_full, q=r, niter=int(niter))
+    else:
+        # Fallback: full SVD (expensive).
+        U, S, Vh = torch.linalg.svd(s_full, full_matrices=False)
+        U = U[:, :r]
+        S = S[:r]
+        V = Vh.transpose(-2, -1)[:, :r]  # (n, r)
+
+    # Construct factors such that B @ A ~= S:
+    # B = U * sqrt(S), A = sqrt(S) * V^T
+    s_sqrt = torch.sqrt(torch.clamp(S, min=0.0))  # (r,)
+    B = U * s_sqrt.unsqueeze(0)  # (m, r)
+    A = (s_sqrt.unsqueeze(1) * V.transpose(0, 1))  # (r, n)
+    return B, A
+
+
+class PissaQuantQATLinear(torch.nn.Linear):
+    """
+    Linear layer with pissaquant weight fake quantization.
+
+    Weight scale is parameterized as S = abs(B @ A) + eps (per-element scale).
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = False,
+        *,
+        weight_qat_config: PissaQuantWeightFakeQuantizeConfig,
+        device: torch.device = None,
+        dtype: torch.dtype = None,
+    ) -> None:
+        super().__init__(in_features, out_features, bias=bias, device=device, dtype=dtype)
+        torch._C._log_api_usage_once("torchao.quantization.qat.PissaQuantQATLinear")
+        self.weight_fake_quantizer = PissaQuantWeightFakeQuantizer(
+            out_features=out_features,
+            in_features=in_features,
+            config=weight_qat_config,
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        w = self.weight_fake_quantizer(self.weight)
+        return F.linear(x, w, self.bias)
+
+    @classmethod
+    def from_linear(
+        cls,
+        mod: torch.nn.Linear,
+        *,
+        weight_qat_config: PissaQuantWeightFakeQuantizeConfig,
+    ) -> "PissaQuantQATLinear":
+        new_linear = cls(
+            mod.in_features,
+            mod.out_features,
+            bias=mod.bias is not None,
+            weight_qat_config=weight_qat_config,
+            device=mod.weight.device,
+            dtype=mod.weight.dtype,
+        )
+        # meta-safe copy
+        if mod.weight.device != torch.device("meta"):
+            new_linear.weight = mod.weight
+            new_linear.bias = mod.bias
+        return new_linear
+
+
+def enable_pissaquant_fake_quant(mod: torch.nn.Module):
+    if isinstance(mod, PissaQuantQATLinear):
+        mod.weight_fake_quantizer.enable_fake_quant(True)
+
+
+def disable_pissaquant_fake_quant(mod: torch.nn.Module):
+    if isinstance(mod, PissaQuantQATLinear):
+        mod.weight_fake_quantizer.disable_fake_quant()
+
+
+class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
+    """
+    QAT quantizer for pissaquant (symmetric int4 weight-only fake quantization).
+
+    This quantizer adds *trainable* parameters (A, B) to every quantized linear
+    layer, so it must be initialized from the full-precision checkpoint weights.
+    """
+
+    def __init__(
+        self,
+        rank: int = 16,
+        block_size: int = 256,
+        eps: float = 1e-8,
+        padding_allowed: bool = False,
+        svd_niter: int = 2,
+    ) -> None:
+        super().__init__()
+        self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
+            rank=rank,
+            block_size=block_size,
+            eps=eps,
+            padding_allowed=padding_allowed,
+            svd_niter=svd_niter,
+        )
+
+    def prepare(
+        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+    ) -> torch.nn.Module:
+        # Replace all nn.Linear with PissaQuantQATLinear
+        for name, child in model.named_children():
+            if isinstance(child, torch.nn.Linear) and not isinstance(
+                child, PissaQuantQATLinear
+            ):
+                setattr(
+                    model,
+                    name,
+                    PissaQuantQATLinear.from_linear(
+                        child, weight_qat_config=self.weight_qat_config
+                    ),
+                )
+            else:
+                self.prepare(child)
+        return model
+
+    def convert(
+        self, model: torch.nn.Module, *args: Any, **kwargs: Any
+    ) -> torch.nn.Module:
+        raise NotImplementedError(
+            "PissaQuantInt4WeightQATQuantizer.convert is not implemented yet."
+        )
+
+    def augment_model_state_dict(
+        self, model: torch.nn.Module, full_sd: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Populate A/B parameters in `full_sd` using the checkpoint's full-precision weights.
+
+        This is needed for strict state_dict loading in torchtune recipes.
+        """
+        cfg = self.weight_qat_config
+        for module_name, mod in model.named_modules():
+            if not isinstance(mod, PissaQuantQATLinear):
+                continue
+
+            # Weight key is unchanged by our module swap.
+            weight_key = f"{module_name}.weight" if module_name else "weight"
+            if weight_key not in full_sd:
+                raise KeyError(
+                    f"Missing {weight_key} in checkpoint state_dict; cannot initialize pissaquant A/B."
+                )
+            w = full_sd[weight_key]
+            if w.dim() != 2:
+                continue
+
+            scales_block, n_padded = _pissaquant_blockwise_symmetric_scales(
+                w,
+                block_size=cfg.block_size,
+                eps=cfg.eps,
+                padding_allowed=cfg.padding_allowed,
+            )
+            # Expand to per-element initial scale matrix (m x n_padded)
+            s_full = scales_block.repeat_interleave(cfg.block_size, dim=1)
+            # Trim to exact in_features
+            s_full = s_full[:, : w.shape[1]]
+
+            B, A = _pissaquant_lowrank_factorize(
+                s_full, rank=cfg.rank, niter=cfg.svd_niter
+            )
+
+            A_key = (
+                f"{module_name}.weight_fake_quantizer.A"
+                if module_name
+                else "weight_fake_quantizer.A"
+            )
+            B_key = (
+                f"{module_name}.weight_fake_quantizer.B"
+                if module_name
+                else "weight_fake_quantizer.B"
+            )
+            full_sd[A_key] = A.to(torch.float32)
+            full_sd[B_key] = B.to(torch.float32)
+
+        return full_sd

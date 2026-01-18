@@ -46,6 +46,52 @@ class FakeQuantizeConfigBase(abc.ABC):
 
 
 @dataclass
+class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
+    """
+    Config for pissaquant weight fake quantization.
+
+    This represents a per-element (per-weight) scale matrix S with low-rank
+    parameterization:
+
+        S = B @ A,  where B in R^{out_features x rank}, A in R^{rank x in_features}
+
+    During fake-quant, we use symmetric int4 quantization with scale:
+
+        scale = abs(S) + eps
+
+    Initialization is expected to come from a block-wise (along in_features) symmetric
+    int4 scale estimate derived from the full-precision weights.
+    """
+
+    # Low-rank factorization rank (r)
+    rank: int = 16
+
+    # Block size (b) used to compute initial block-wise scales along in_features.
+    # This is only used for initialization.
+    block_size: int = 256
+
+    # Numerical stability for scale.
+    eps: float = 1e-8
+
+    # If True, allow padding in_features to a multiple of block_size during initialization.
+    # (Forward pass still uses exact shapes; padding is only for init.)
+    padding_allowed: bool = False
+
+    # Low-rank SVD init iterations for svd_lowrank (if available).
+    svd_niter: int = 2
+
+    def __post_init__(self):
+        if self.rank <= 0:
+            raise ValueError(f"rank must be > 0, got {self.rank}")
+        if self.block_size <= 0:
+            raise ValueError(f"block_size must be > 0, got {self.block_size}")
+        if self.eps <= 0:
+            raise ValueError(f"eps must be > 0, got {self.eps}")
+        if self.svd_niter < 0:
+            raise ValueError(f"svd_niter must be >= 0, got {self.svd_niter}")
+
+
+@dataclass
 class Float8FakeQuantizeConfig(FakeQuantizeConfigBase):
     """
     Config for float8 fake quantization, targeting :class:`~torchao.quantization.Float8Tensor`.
