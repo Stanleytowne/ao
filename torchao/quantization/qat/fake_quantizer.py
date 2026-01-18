@@ -7,6 +7,7 @@
 from typing import Optional
 
 import torch
+import torch.utils.checkpoint
 
 from torchao.quantization.granularity import (
     PerAxis,
@@ -430,14 +431,31 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
         if not self.enabled:
             return w
 
+        if self.config.use_checkpoint:
+            # Checkpoint the whole fake-quant to avoid saving large intermediates
+            # (e.g. per-element scale) for backward.
+            return torch.utils.checkpoint.checkpoint(
+                self._fake_quant_impl,
+                w,
+                self.B,
+                self.A,
+                use_reentrant=False,
+            )
+        return self._fake_quant_impl(w, self.B, self.A)
+
+    def _fake_quant_impl(
+        self, w: torch.Tensor, B: torch.Tensor, A: torch.Tensor
+    ) -> torch.Tensor:
         # Symmetric int4.
         qmin, qmax = -8, 7
 
-        scale = self._compute_scale()
-        # Cast scale to fp32 for quant math; keep output dtype matching w.
-        w_fp32 = w.to(torch.float32)
-        scale_fp32 = scale.to(torch.float32)
+        # Compute per-element scale in fp32 for stability.
+        scale_fp32 = torch.abs(B.to(torch.float32) @ A.to(torch.float32)) + float(
+            self.config.eps
+        )
 
+        # Quant math in fp32; output matches input dtype.
+        w_fp32 = w.to(torch.float32)
         q = _Round.apply(w_fp32 / scale_fp32).clamp(qmin, qmax)
         w_hat = q * scale_fp32
         return w_hat.to(w.dtype)

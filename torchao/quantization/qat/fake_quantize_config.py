@@ -80,6 +80,10 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
     # Low-rank SVD init iterations for svd_lowrank (if available).
     svd_niter: int = 2
 
+    # If True, wrap the pissaquant fake-quant computation in gradient checkpointing
+    # to reduce activation memory (at the cost of recomputation in backward).
+    use_checkpoint: bool = False
+
     def __post_init__(self):
         if self.rank <= 0:
             raise ValueError(f"rank must be > 0, got {self.rank}")
@@ -89,6 +93,10 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
             raise ValueError(f"eps must be > 0, got {self.eps}")
         if self.svd_niter < 0:
             raise ValueError(f"svd_niter must be >= 0, got {self.svd_niter}")
+        if not isinstance(self.use_checkpoint, bool):
+            raise ValueError(
+                f"use_checkpoint must be a bool, got {type(self.use_checkpoint)}"
+            )
 
 
 @dataclass

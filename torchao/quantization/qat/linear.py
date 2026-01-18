@@ -821,6 +821,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
         eps: float = 1e-8,
         padding_allowed: bool = False,
         svd_niter: int = 2,
+        use_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
@@ -829,6 +830,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             eps=eps,
             padding_allowed=padding_allowed,
             svd_niter=svd_niter,
+            use_checkpoint=use_checkpoint,
         )
 
     def prepare(
