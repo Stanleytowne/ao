@@ -813,7 +813,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
         block_size: int = 256,
         use_checkpoint: bool = False,
         svd_niter: int = 64,
-        ab_state_dict_path: Optional[str] = None,
+        pissaquant_ab_init_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
@@ -821,7 +821,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             use_checkpoint=use_checkpoint,
             svd_niter=svd_niter,
         )
-        self.ab_state_dict_path = ab_state_dict_path
+        self.pissaquant_ab_init_path = pissaquant_ab_init_path
 
     def prepare(
         self, model: torch.nn.Module, *args: Any, **kwargs: Any
