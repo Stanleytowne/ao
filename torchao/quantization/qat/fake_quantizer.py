@@ -420,13 +420,6 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
     def disable_fake_quant(self) -> None:
         self.enable_fake_quant(False)
 
-    def _compute_scale(self) -> torch.Tensor:
-        # Compute scale in fp32 for stability, but keep parameters in their
-        # original dtype for FSDP compatibility.
-        s = self.B.to(torch.float32) @ self.A.to(torch.float32)
-        s = torch.abs(s) + float(self.config.eps)
-        return s  # fp32
-
     def forward(self, w: torch.Tensor) -> torch.Tensor:
         if not self.enabled:
             return w

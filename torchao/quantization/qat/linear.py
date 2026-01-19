@@ -813,6 +813,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
         block_size: int = 256,
         use_checkpoint: bool = False,
         svd_niter: int = 64,
+        ab_state_dict_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.weight_qat_config = PissaQuantWeightFakeQuantizeConfig(
@@ -820,6 +821,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             use_checkpoint=use_checkpoint,
             svd_niter=svd_niter,
         )
+        self.ab_state_dict_path = ab_state_dict_path
 
     def prepare(
         self, model: torch.nn.Module, *args: Any, **kwargs: Any
@@ -847,78 +849,3 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             "PissaQuantInt4WeightQATQuantizer.convert is not implemented yet."
         )
 
-    def augment_model_state_dict(
-        self, model: torch.nn.Module, full_sd: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Populate A/B parameters in `full_sd` using the checkpoint's full-precision weights.
-
-        This is needed for strict state_dict loading in torchtune recipes.
-        """
-        cfg = self.weight_qat_config
-        # Activation checkpointing can wrap modules and introduce an intermediate
-        # `_checkpoint_wrapped_module` segment in `named_modules()` paths. The
-        # checkpoint state dict (and sometimes even `state_dict()` keys) may not
-        # include that segment. We therefore resolve keys robustly.
-        checkpoint_wrapper_seg = "._checkpoint_wrapped_module"
-        for module_name, mod in model.named_modules():
-            if not isinstance(mod, PissaQuantQATLinear):
-                continue
-
-            # Weight key is unchanged by our module swap, but module_name may include
-            # wrapper segments.
-            candidate_module_names = []
-            if module_name:
-                candidate_module_names.append(module_name)
-                if checkpoint_wrapper_seg in module_name:
-                    candidate_module_names.append(
-                        module_name.replace(checkpoint_wrapper_seg, "")
-                    )
-            else:
-                candidate_module_names.append("")
-
-            weight_key = None
-            for mn in candidate_module_names:
-                wk = f"{mn}.weight" if mn else "weight"
-                if wk in full_sd:
-                    weight_key = wk
-                    break
-            if weight_key is None:
-                # Provide a more actionable error with candidates.
-                candidates = [f"{mn}.weight" if mn else "weight" for mn in candidate_module_names]
-                raise KeyError(
-                    "Missing weight key in checkpoint state_dict; cannot initialize pissaquant A/B. "
-                    f"Tried: {candidates}. One example module path was '{module_name}'."
-                )
-            w = full_sd[weight_key]
-            if w.dim() != 2:
-                continue
-
-            rank = cfg.compute_rank(in_features=w.shape[1], out_features=w.shape[0])
-            init_block_size = w.shape[1] // rank
-            while w.shape[1] % init_block_size != 0:
-                init_block_size -= 1
-            assert init_block_size > 0, f"init_block_size ({init_block_size}) must be > 0, got out_features ({w.shape[0]}), in_features ({w.shape[1]}) and rank ({rank})"
-
-            scales_block = _pissaquant_blockwise_symmetric_scales(
-                w,
-                block_size=init_block_size,
-                eps=cfg.eps,
-            )
-            # Expand to per-element initial scale matrix (m x n_padded)
-            s_full = scales_block.repeat_interleave(init_block_size, dim=1)
-            B, A = _pissaquant_lowrank_factorize(
-                s_full, rank=rank, niter=cfg.svd_niter
-            )
-
-            # Use the resolved prefix from the weight key to ensure consistent naming
-            # with the checkpoint/model state_dict keyspace.
-            prefix = weight_key[: -len(".weight")] if weight_key != "weight" else ""
-            A_key = f"{prefix}.weight_fake_quantizer.A" if prefix else "weight_fake_quantizer.A"
-            B_key = f"{prefix}.weight_fake_quantizer.B" if prefix else "weight_fake_quantizer.B"
-            # Store in the same dtype as checkpoint weight; loader will cast to
-            # the destination param dtype (which matches model dtype).
-            full_sd[A_key] = A.to(dtype=w.dtype)
-            full_sd[B_key] = B.to(dtype=w.dtype)
-
-        return full_sd
