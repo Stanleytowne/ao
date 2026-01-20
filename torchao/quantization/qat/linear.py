@@ -662,39 +662,6 @@ class Float8ActInt4WeightQATQuantizer(_LegacyQATQuantizer):
 # =====================================================
 
 
-def _pissaquant_blockwise_symmetric_scales(
-    w: torch.Tensor, *, block_size: int, eps: float
-) -> torch.Tensor:
-    """
-    Compute per-block symmetric int4 scales along the in_features dimension.
-
-    Given W with shape [m, n], we compute block scales with shape [m, n_blocks],
-    where n_blocks = n // block_size.
-
-    Returns:
-        scales_block: [m, n_blocks]
-    """
-    assert w.dim() == 2, "Expected 2D weight matrix"
-    m, n = w.shape
-    b = int(block_size)
-    if b <= 0:
-        raise ValueError(f"block_size must be > 0, got {block_size}")
-    if (n % b) != 0:
-        raise ValueError(
-            f"in_features ({n}) must be divisible by block_size ({b}) to match int4 "
-            "weight-only QAT scale parameterization."
-        )
-
-    # symmetric int4 qmax
-    n_bit = 4
-    (qmin, qmax) = _get_qmin_qmax(n_bit)
-    w = w.to(torch.float32)
-    w_blocks = w.view(m, -1, b)
-    max_abs = torch.amax(torch.abs(w_blocks), dim=-1)  # [m, n_blocks]
-    scales = torch.clamp(max_abs / qmax, min=float(eps))
-    return scales
-
-
 def _pissaquant_lowrank_factorize(
     s_full: torch.Tensor, *, rank: int, niter: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:

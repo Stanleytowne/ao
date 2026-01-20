@@ -358,12 +358,12 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
 
     and uses elementwise scale:
 
-        scale = abs(S) + eps
+        scale = clamp(abs(S), min=eps)
 
     to perform symmetric int4 fake quantization:
 
-        q = round(w / scale) clipped and rounded to {-8, ..., 7}
-        w_hat = q * scale
+        q = round(w / scale + 8) clamp to {0, ..., 15}
+        w_hat = (q - 8) * scale
 
     Notes:
     - `A` and `B` are trainable and must be initialized externally (typically by
@@ -439,16 +439,12 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
     def _fake_quant_impl(
         self, w: torch.Tensor, B: torch.Tensor, A: torch.Tensor
     ) -> torch.Tensor:
-        # Symmetric int4.
-        qmin, qmax = -8, 7
-
         # Compute per-element scale in fp32 for stability.
-        scale_fp32 = torch.abs(B.to(torch.float32) @ A.to(torch.float32)) + float(
-            self.config.eps
-        )
+        scale_fp32 = torch.abs(B.to(torch.float32) @ A.to(torch.float32))
+        scale_fp32 = torch.clamp(scale_fp32, min=float(self.config.eps))
 
         # Quant math in fp32; output matches input dtype.
         w_fp32 = w.to(torch.float32)
-        q = _Round.apply(w_fp32 / scale_fp32).clamp(qmin, qmax)
-        w_hat = q * scale_fp32
+        q = _Round.apply(w_fp32 / scale_fp32 + 8).clamp(0, 15)
+        w_hat = (q - 8) * scale_fp32
         return w_hat.to(w.dtype)
