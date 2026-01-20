@@ -69,8 +69,6 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
     # int4 weight-only QAT (per-group scales of size `block_size`).
     block_size: int = 256
 
-    pissaquant_ab_init_path: Optional[str] = None
-
     # If True, wrap the pissaquant fake-quant computation in gradient checkpointing
     # to reduce activation memory (at the cost of recomputation in backward).
     use_checkpoint: bool = False
@@ -90,8 +88,6 @@ class PissaQuantWeightFakeQuantizeConfig(FakeQuantizeConfigBase):
             raise ValueError(
                 f"use_checkpoint must be a bool, got {type(self.use_checkpoint)}"
             )
-        if self.pissaquant_ab_init_path is not None and not os.path.exists(self.pissaquant_ab_init_path):
-            raise ValueError(f"pissaquant_ab_init_path {self.pissaquant_ab_init_path} does not exist")
 
     def compute_rank(self, in_features: int, out_features: int) -> int:
         """

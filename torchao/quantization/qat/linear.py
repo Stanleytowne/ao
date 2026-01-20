@@ -832,7 +832,6 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             block_size=block_size,
             use_checkpoint=use_checkpoint,
             svd_niter=svd_niter,
-            pissaquant_ab_init_path=pissaquant_ab_init_path
         )
         self.pissaquant_ab_init_path = pissaquant_ab_init_path
 
