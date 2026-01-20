@@ -789,6 +789,18 @@ class PissaQuantQATLinear(torch.nn.Linear):
             new_linear.bias = mod.bias
         return new_linear
 
+    def to_linear(self) -> torch.nn.Linear:
+        new_linear = torch.nn.Linear(
+            self.in_features,
+            self.out_features,
+            self.bias is not None,
+            device=self.weight.device,
+            dtype=self.weight.dtype,
+        )
+        new_linear.weight = self.weight_fake_quantizer(self.weight)
+        new_linear.bias = self.bias
+        return new_linear
+
 
 def enable_pissaquant_fake_quant(mod: torch.nn.Module):
     if isinstance(mod, PissaQuantQATLinear):
@@ -820,6 +832,7 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
             block_size=block_size,
             use_checkpoint=use_checkpoint,
             svd_niter=svd_niter,
+            pissaquant_ab_init_path=pissaquant_ab_init_path
         )
         self.pissaquant_ab_init_path = pissaquant_ab_init_path
 
@@ -845,7 +858,10 @@ class PissaQuantInt4WeightQATQuantizer(_LegacyQATQuantizer):
     def convert(
         self, model: torch.nn.Module, *args: Any, **kwargs: Any
     ) -> torch.nn.Module:
-        raise NotImplementedError(
-            "PissaQuantInt4WeightQATQuantizer.convert is not implemented yet."
-        )
+        for name, child in model.named_children():
+            if isinstance(child, PissaQuantQATLinear):
+                setattr(model, name, child.to_linear())
+            else:
+                self.convert(child)
+        return model
 

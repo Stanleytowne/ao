@@ -362,7 +362,7 @@ class PissaQuantWeightFakeQuantizer(torch.nn.Module):
 
     to perform symmetric int4 fake quantization:
 
-        q = round(w / scale) clipped to [-8, 7]
+        q = round(w / scale) clipped and rounded to {-8, ..., 7}
         w_hat = q * scale
 
     Notes:
