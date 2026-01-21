@@ -579,6 +579,7 @@ def _get_4w_weight_config(
         scale_precision=qparams_precision,
         zero_point_precision=qparams_precision,
         zero_point_domain=ZeroPointDomain.FLOAT,
+        eps=1e-8
     )
 
 
